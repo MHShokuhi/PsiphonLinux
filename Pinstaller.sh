@@ -1,24 +1,45 @@
 #! /bin/bash
 
+set -e
+
 # Variables
 INSTALL_DIR="/etc/psiphon"
-BINARY_URL="https://raw.githubusercontent.com/090ebier/PsiphonLinux/refs/heads/main/psiphon-tunnel-core-x86_64"
 CONFIG_URL="https://raw.githubusercontent.com/090ebier/PsiphonLinux/main/psiphon.config"
 STARTUP_SCRIPT_URL="https://raw.githubusercontent.com/090ebier/PsiphonLinux/main/psiphon"
 SERVICE_FILE="/etc/systemd/system/psiphon.service"
+
+# Detect architecture -> choose binary
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64)
+    BINARY_NAME="psiphon-tunnel-core-x86_64"
+    BINARY_URL="https://raw.githubusercontent.com/090ebier/PsiphonLinux/refs/heads/main/psiphon-tunnel-core-x86_64"
+    ;;
+  aarch64|arm64)
+    BINARY_NAME="psiphon-tunnel-core-arm64"
+    BINARY_URL="https://raw.githubusercontent.com/090ebier/PsiphonLinux/refs/heads/main/psiphon-tunnel-core-arm64"
+    ;;
+  *)
+    echo "ERROR: Unsupported architecture: $ARCH"
+    exit 1
+    ;;
+esac
+
+echo "Detected architecture: $ARCH"
+echo "Using binary: $BINARY_NAME"
 
 # Create necessary directories
 mkdir -p "$INSTALL_DIR"
 
 # Download necessary scripts and files
 echo "Starting downloads..."
-wget -P "$INSTALL_DIR" "$BINARY_URL" --quiet
-wget -P "$INSTALL_DIR" "$CONFIG_URL" --quiet
-wget -P /usr/bin/ "$STARTUP_SCRIPT_URL" --quiet
+wget -O "$INSTALL_DIR/$BINARY_NAME" "$BINARY_URL" --quiet
+wget -O "$INSTALL_DIR/psiphon.config" "$CONFIG_URL" --quiet
+wget -O "/usr/bin/psiphon" "$STARTUP_SCRIPT_URL" --quiet
 echo "Downloads finished."
 
 # Set permissions
-chmod +x "$INSTALL_DIR/psiphon-tunnel-core-x86_64"
+chmod +x "$INSTALL_DIR/$BINARY_NAME"
 chmod +x /usr/bin/psiphon
 
 # Create systemd service file
@@ -29,7 +50,7 @@ Description=Psiphon Service
 After=network.target
 
 [Service]
-ExecStart=/etc/psiphon/psiphon-tunnel-core-x86_64 -config /etc/psiphon/psiphon.config
+ExecStart=$INSTALL_DIR/$BINARY_NAME -config $INSTALL_DIR/psiphon.config
 Restart=always
 User=root
 
@@ -42,12 +63,12 @@ systemctl daemon-reload
 
 # Enable and start the Psiphon service
 systemctl enable psiphon
-systemctl start psiphon
+systemctl restart psiphon
 
 # Post-install checks
 echo "Running post-install checks..."
 
-if test -f "$INSTALL_DIR/psiphon-tunnel-core-x86_64"; then
+if test -f "$INSTALL_DIR/$BINARY_NAME"; then
     echo "Psiphon binary found."
 else
     echo "ERROR: Psiphon binary not found!"
@@ -69,6 +90,8 @@ if systemctl is-active --quiet psiphon; then
     echo "Psiphon service is running."
 else
     echo "ERROR: Psiphon service is not running!"
+    systemctl status psiphon --no-pager || true
+    journalctl -u psiphon --no-pager -n 50 || true
 fi
 
 # Finish installation
