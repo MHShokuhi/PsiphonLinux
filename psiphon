@@ -5,7 +5,7 @@ SERVICE_FILE="/etc/systemd/system/psiphon.service"
 INSTALL_DIR="/etc/psiphon"
 
 show_help() {
-  echo "Usage: psiphon [start|stop|restart|status|region|httpport|socksport|uninstall]"
+  echo "Usage: psiphon [start|stop|restart|status|region|httpport|socksport|ip|checkip|uninstall]"
   echo
   echo "start             - Start the Psiphon service."
   echo "stop              - Stop the Psiphon service."
@@ -14,6 +14,7 @@ show_help() {
   echo "region [code]     - Set the EgressRegion to the specified region code."
   echo "httpport [port]   - Set the LocalHttpProxyPort to the specified port."
   echo "socksport [port]  - Set the LocalSocksProxyPort to the specified port."
+  echo "ip                - Show exit IP via Psiphon SOCKS proxy (dynamic port)."
   echo "uninstall         - Uninstall Psiphon."
   echo
   echo "Valid region codes are: AT, BE, BG, CA, CH, CZ, DE, DK, EE, ES, FI, FR, GB, HU, IE, IN, IT, JP, LV, NL, NO, PL, RO, RS, SE, SG, SK, US"
@@ -39,11 +40,10 @@ get_socks_port() {
 wait_for_port() {
   local host="$1"
   local port="$2"
-  local tries="${3:-30}"   # 30 tries
-  local sleep_s="${4:-1}"  # 1s between tries
+  local tries="${3:-30}"
+  local sleep_s="${4:-1}"
 
-  for i in $(seq 1 "$tries"); do
-    # bash TCP check
+  for _ in $(seq 1 "$tries"); do
     (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1 && return 0
     sleep "$sleep_s"
   done
@@ -54,14 +54,13 @@ print_proxy_ip() {
   local socks_port
   socks_port="$(get_socks_port)"
 
-  # 1) ensure service is active (best-effort)
+  # 1) ensure service is active
   if ! systemctl is-active --quiet psiphon; then
     printf "[%s] Proxy IP (SOCKS:%s): (service not active)\n" "$(date '+%F %T')" "$socks_port"
     return 1
   fi
 
-  # 2) wait until SOCKS port is actually listening
-  # try both 127.0.0.1 and localhost
+  # 2) wait until SOCKS port is listening
   if ! wait_for_port "127.0.0.1" "$socks_port" 30 1; then
     if ! wait_for_port "localhost" "$socks_port" 10 1; then
       printf "[%s] Proxy IP (SOCKS:%s): (port not ready)\n" "$(date '+%F %T')" "$socks_port"
@@ -69,10 +68,10 @@ print_proxy_ip() {
     fi
   fi
 
-  # 3) now fetch IP with retries + show curl errors if still failing
+  # 3) fetch IP with retries
   local ip=""
   local err=""
-  for i in $(seq 1 10); do
+  for _ in $(seq 1 10); do
     err="$(mktemp)"
     ip="$(curl -sS --fail \
       --connect-timeout 3 --max-time 8 \
@@ -86,12 +85,11 @@ print_proxy_ip() {
       return 0
     fi
 
-    # if empty, keep trying a bit (tunnel may still be establishing)
     sleep 1
     rm -f "$err"
   done
 
-  # last attempt: print curl error details for debugging
+  # last error message
   err="$(mktemp)"
   ip="$(curl -sS --fail \
     --connect-timeout 3 --max-time 8 \
@@ -120,7 +118,7 @@ update_region() {
   local new_region=$1
   local valid_regions=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
 
-  if [[ " ${valid_regions[@]} " =~ " ${new_region} " ]]; then
+  if [[ " ${valid_regions[*]} " =~ " ${new_region} " ]]; then
     if [ -f "$CONFIG_FILE" ]; then
       echo "Updating region to $new_region..."
       sudo sed -i "s/\"EgressRegion\":\"[^\"]*\"/\"EgressRegion\":\"$new_region\"/" "$CONFIG_FILE"
@@ -132,7 +130,7 @@ update_region() {
     fi
   else
     echo "Invalid region: $new_region"
-    echo "Valid regions are: ${valid_regions[@]}"
+    echo "Valid regions are: ${valid_regions[*]}"
     exit 1
   fi
 }
@@ -222,10 +220,17 @@ case "$1" in
     [ -n "$2" ] || { echo "Please provide a SOCKS port. Usage: psiphon socksport [port_number]"; exit 1; }
     update_socks_port "$2"
     ;;
+  ip)
+    print_proxy_ip
+    ;;
   uninstall)
     uninstall
     ;;
+  ""|help|-h|--help)
+    show_help
+    ;;
   *)
     show_help
+    exit 1
     ;;
 esac
