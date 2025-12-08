@@ -6,7 +6,10 @@ This script provides a convenient way to control and configure the Psiphon servi
 
 - A Linux system with Psiphon installed.
 - `systemd` must be available to manage the Psiphon service.
-- Psiphon binary and configuration files must be correctly set up in the appropriate locations (e.g., `/etc/psiphon/psiphon-tunnel-core-x86_64` and `/etc/psiphon/psiphon.config`).
+- Psiphon binary and configuration files must be correctly set up in the appropriate locations:
+  - x86_64: `/etc/psiphon/psiphon-tunnel-core-x86_64`
+  - arm64/aarch64: `/etc/psiphon/psiphon-tunnel-core-arm64`
+  - config: `/etc/psiphon/psiphon.config`
 
 ## Features
 
@@ -17,7 +20,9 @@ This script provides a convenient way to control and configure the Psiphon servi
 - **Change the HTTP proxy port** (e.g., `8081`).
 - **Change the SOCKS proxy port** (e.g., `1081`).
 - **Restart** the Psiphon service to apply any changes.
+- **Display proxy IP** via the running Psiphon proxy.
 - **Uninstall** the Psiphon service and remove associated files.
+- **Supports arm64/aarch64** in addition to x86_64/amd64.
 
 ## Installation
 
@@ -25,13 +30,13 @@ To install the Psiphon service and control script, execute the following command
 
 ```bash
 curl -s https://raw.githubusercontent.com/090ebier/PsiphonLinux/refs/heads/main/Pinstaller.sh | sudo bash
-```
+````
 
 This command will:
 
-- Download and install the Psiphon binary and configuration files.
-- Create the necessary systemd service for managing Psiphon.
-- Install the control script to `/usr/bin/psiphon` for easy management.
+* Download and install the Psiphon binary and configuration files (x86_64 or arm64 based on your CPU).
+* Create the necessary systemd service for managing Psiphon.
+* Install the control script to `/usr/bin/psiphon` for easy management.
 
 ## Uninstalling Psiphon
 
@@ -43,11 +48,11 @@ sudo psiphon uninstall
 
 This command will:
 
-- Stop the Psiphon service if it is running.
-- Remove the Psiphon binary from `/etc/psiphon/psiphon-tunnel-core-x86_64`.
-- Delete the Psiphon configuration file from `/etc/psiphon/psiphon.config`.
-- Remove the control script from `/usr/bin/psiphon`.
-- Disable and remove the Psiphon service from `systemd`.
+* Stop the Psiphon service if it is running.
+* Disable and remove the Psiphon service from `systemd`.
+* Remove Psiphon files from `/etc/psiphon/`.
+* Remove the control script from `/usr/bin/psiphon`.
+* Reload systemd daemon.
 
 **Note**: After running the uninstall command, Psiphon will be completely removed from your system.
 
@@ -59,17 +64,18 @@ After installation, you can use the `psiphon` command to manage the service and 
 psiphon [command] [arguments]
 ```
 
-### Available Commands:
+### Available Commands
 
-- **start** - Start the Psiphon service.
-- **stop** - Stop the Psiphon service.
-- **status** - Show the status of the Psiphon service.
-- **region [REGION]** - Change the egress region. Replace `[REGION]` with one of the supported regions (e.g., `US`, `GB`, `CA`).
-- **httpport [PORT]** - Change the HTTP proxy port. Replace `[PORT]` with the desired port number (e.g., `8081`).
-- **socksport [PORT]** - Change the SOCKS proxy port. Replace `[PORT]` with the desired port number (e.g., `1081`).
-- **restart** - Restart the Psiphon service to apply any changes.
+* **start** - Start the Psiphon service.
+* **stop** - Stop the Psiphon service.
+* **status** - Show the status of the Psiphon service.
+* **region [REGION]** - Change the egress region (e.g., `US`, `GB`, `CA`).
+* **httpport [PORT]** - Change the HTTP proxy port (e.g., `8081`).
+* **socksport [PORT]** - Change the SOCKS proxy port (e.g., `1081`).
+* **restart** - Restart the Psiphon service to apply any changes.
+* **ip** - Display the outgoing IP address as seen through the Psiphon proxy.
 
-### Example Usage:
+### Example Usage
 
 Start the Psiphon service:
 
@@ -113,7 +119,14 @@ Restart the Psiphon service to apply changes:
 sudo psiphon restart
 ```
 
+Show proxy IP (through Psiphon):
+
+```bash
+sudo psiphon ip
+```
+
 Display the help message to see all available commands:
 
 ```bash
-sudo psiphon 
+sudo psiphon
+```
