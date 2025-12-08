@@ -24,10 +24,8 @@ show_help() {
 get_socks_port() {
   local port=""
   if [ -f "$CONFIG_FILE" ]; then
-    # Extract number after "LocalSocksProxyPort":
     port="$(grep -oE '"LocalSocksProxyPort"[[:space:]]*:[[:space:]]*[0-9]+' "$CONFIG_FILE" \
-      | head -n1 \
-      | grep -oE '[0-9]+' || true)"
+      | head -n1 | grep -oE '[0-9]+' || true)"
   fi
 
   if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
@@ -37,38 +35,78 @@ get_socks_port() {
   fi
 }
 
-# Print proxy IP after restart, with retries until service is ready
+# Wait until a TCP port is actually open (listening) on host:port
+wait_for_port() {
+  local host="$1"
+  local port="$2"
+  local tries="${3:-30}"   # 30 tries
+  local sleep_s="${4:-1}"  # 1s between tries
+
+  for i in $(seq 1 "$tries"); do
+    # bash TCP check
+    (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1 && return 0
+    sleep "$sleep_s"
+  done
+  return 1
+}
+
 print_proxy_ip() {
   local socks_port
   socks_port="$(get_socks_port)"
 
-  local tries=10           # total attempts
-  local sleep_s=1          # delay between attempts
-  local ip=""
+  # 1) ensure service is active (best-effort)
+  if ! systemctl is-active --quiet psiphon; then
+    printf "[%s] Proxy IP (SOCKS:%s): (service not active)\n" "$(date '+%F %T')" "$socks_port"
+    return 1
+  fi
 
-  for i in $(seq 1 "$tries"); do
-    # quick check: service running?
-    if ! systemctl is-active --quiet psiphon; then
-      ip=""
-    else
-      # fetch ip with short timeouts to avoid hanging
-      ip="$(curl -s --connect-timeout 3 --max-time 6 -x "socks5h://127.0.0.1:${socks_port}" https://ifconfig.me || true)"
-      ip="$(echo "$ip" | tr -d '[:space:]')"
+  # 2) wait until SOCKS port is actually listening
+  # try both 127.0.0.1 and localhost
+  if ! wait_for_port "127.0.0.1" "$socks_port" 30 1; then
+    if ! wait_for_port "localhost" "$socks_port" 10 1; then
+      printf "[%s] Proxy IP (SOCKS:%s): (port not ready)\n" "$(date '+%F %T')" "$socks_port"
+      return 1
     fi
+  fi
+
+  # 3) now fetch IP with retries + show curl errors if still failing
+  local ip=""
+  local err=""
+  for i in $(seq 1 10); do
+    err="$(mktemp)"
+    ip="$(curl -sS --fail \
+      --connect-timeout 3 --max-time 8 \
+      -x "socks5h://127.0.0.1:${socks_port}" \
+      https://ifconfig.me 2>"$err" || true)"
+    ip="$(echo "$ip" | tr -d '[:space:]')"
 
     if [ -n "$ip" ]; then
+      rm -f "$err"
       printf "[%s] Proxy IP (SOCKS:%s): %s\n" "$(date '+%F %T')" "$socks_port" "$ip"
       return 0
     fi
 
-    # Not ready yet
-    if [ "$i" -lt "$tries" ]; then
-      sleep "$sleep_s"
-    fi
+    # if empty, keep trying a bit (tunnel may still be establishing)
+    sleep 1
+    rm -f "$err"
   done
 
-  # If still empty after retries:
-  printf "[%s] Proxy IP (SOCKS:%s): (not available yet)\n" "$(date '+%F %T')" "$socks_port"
+  # last attempt: print curl error details for debugging
+  err="$(mktemp)"
+  ip="$(curl -sS --fail \
+    --connect-timeout 3 --max-time 8 \
+    -x "socks5h://127.0.0.1:${socks_port}" \
+    https://ifconfig.me 2>"$err" || true)"
+  ip="$(echo "$ip" | tr -d '[:space:]')"
+
+  if [ -n "$ip" ]; then
+    rm -f "$err"
+    printf "[%s] Proxy IP (SOCKS:%s): %s\n" "$(date '+%F %T')" "$socks_port" "$ip"
+    return 0
+  fi
+
+  printf "[%s] Proxy IP (SOCKS:%s): (curl failed) - %s\n" "$(date '+%F %T')" "$socks_port" "$(tr '\n' ' ' < "$err")"
+  rm -f "$err"
   return 1
 }
 
@@ -154,7 +192,6 @@ uninstall() {
   sudo rmdir "$INSTALL_DIR" 2>/dev/null || true
 
   sudo systemctl daemon-reload
-
   echo "Psiphon uninstalled successfully."
 }
 
