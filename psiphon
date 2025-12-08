@@ -4,37 +4,80 @@ CONFIG_FILE="/etc/psiphon/psiphon.config"
 SERVICE_FILE="/etc/systemd/system/psiphon.service"
 INSTALL_DIR="/etc/psiphon"
 
-# Function to display help message
 show_help() {
   echo "Usage: psiphon [start|stop|restart|status|region|httpport|socksport|uninstall]"
   echo
-  echo "start           - Start the Psiphon service."
-  echo "stop            - Stop the Psiphon service."
-  echo "restart         - Restart the Psiphon service."
-  echo "status          - Show the status of the Psiphon service."
-  echo "region [code]   - Set the EgressRegion to the specified region code."
-  echo "httpport [port] - Set the LocalHttpProxyPort to the specified port."
-  echo "socksport [port]- Set the LocalSocksProxyPort to the specified port."
-  echo "uninstall       - Uninstall Psiphon."
+  echo "start             - Start the Psiphon service."
+  echo "stop              - Stop the Psiphon service."
+  echo "restart           - Restart the Psiphon service."
+  echo "status            - Show the status of the Psiphon service."
+  echo "region [code]     - Set the EgressRegion to the specified region code."
+  echo "httpport [port]   - Set the LocalHttpProxyPort to the specified port."
+  echo "socksport [port]  - Set the LocalSocksProxyPort to the specified port."
+  echo "uninstall         - Uninstall Psiphon."
   echo
   echo "Valid region codes are: AT, BE, BG, CA, CH, CZ, DE, DK, EE, ES, FI, FR, GB, HU, IE, IN, IT, JP, LV, NL, NO, PL, RO, RS, SE, SG, SK, US"
   echo "Port numbers must be between 1024 and 65535."
 }
 
-# Print proxy IP via SOCKS after restart (as requested)
-print_proxy_ip() {
-  # exactly as user requested (fixed port 1081)
-  printf "[%s] Proxy IP: %s\n" "$(date '+%F %T')" "$(curl -s -x socks5h://127.0.0.1:1081 https://ifconfig.me)"
+# Read SOCKS port from config dynamically; fallback to 1081
+get_socks_port() {
+  local port=""
+  if [ -f "$CONFIG_FILE" ]; then
+    # Extract number after "LocalSocksProxyPort":
+    port="$(grep -oE '"LocalSocksProxyPort"[[:space:]]*:[[:space:]]*[0-9]+' "$CONFIG_FILE" \
+      | head -n1 \
+      | grep -oE '[0-9]+' || true)"
+  fi
+
+  if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+    echo "$port"
+  else
+    echo "1081"
+  fi
 }
 
-# Function to restart the Psiphon service + print proxy IP
+# Print proxy IP after restart, with retries until service is ready
+print_proxy_ip() {
+  local socks_port
+  socks_port="$(get_socks_port)"
+
+  local tries=10           # total attempts
+  local sleep_s=1          # delay between attempts
+  local ip=""
+
+  for i in $(seq 1 "$tries"); do
+    # quick check: service running?
+    if ! systemctl is-active --quiet psiphon; then
+      ip=""
+    else
+      # fetch ip with short timeouts to avoid hanging
+      ip="$(curl -s --connect-timeout 3 --max-time 6 -x "socks5h://127.0.0.1:${socks_port}" https://ifconfig.me || true)"
+      ip="$(echo "$ip" | tr -d '[:space:]')"
+    fi
+
+    if [ -n "$ip" ]; then
+      printf "[%s] Proxy IP (SOCKS:%s): %s\n" "$(date '+%F %T')" "$socks_port" "$ip"
+      return 0
+    fi
+
+    # Not ready yet
+    if [ "$i" -lt "$tries" ]; then
+      sleep "$sleep_s"
+    fi
+  done
+
+  # If still empty after retries:
+  printf "[%s] Proxy IP (SOCKS:%s): (not available yet)\n" "$(date '+%F %T')" "$socks_port"
+  return 1
+}
+
 restart_service() {
   sudo systemctl restart psiphon
   echo "Psiphon service has been restarted."
-  print_proxy_ip
+  print_proxy_ip || true
 }
 
-# Function to update the region in the config file
 update_region() {
   local new_region=$1
   local valid_regions=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
@@ -56,7 +99,6 @@ update_region() {
   fi
 }
 
-# Function to update the HTTP proxy port
 update_http_port() {
   local new_http_port=$1
   if [[ "$new_http_port" =~ ^[0-9]+$ ]] && [ "$new_http_port" -ge 1024 ] && [ "$new_http_port" -le 65535 ]; then
@@ -76,7 +118,6 @@ update_http_port() {
   fi
 }
 
-# Function to update the SOCKS proxy port
 update_socks_port() {
   local new_socks_port=$1
   if [[ "$new_socks_port" =~ ^[0-9]+$ ]] && [ "$new_socks_port" -ge 1024 ] && [ "$new_socks_port" -le 65535 ]; then
@@ -96,35 +137,27 @@ update_socks_port() {
   fi
 }
 
-# Function to uninstall Psiphon
 uninstall() {
   echo "Uninstalling Psiphon..."
 
-  # Stop and disable the Psiphon service (ignore errors if not present)
   sudo systemctl stop psiphon 2>/dev/null || true
   sudo systemctl disable psiphon 2>/dev/null || true
 
-  # Remove systemd service file
   sudo rm -f "$SERVICE_FILE"
 
-  # Remove Psiphon binaries and configuration files
   sudo rm -f "$INSTALL_DIR/psiphon-tunnel-core-x86_64"
   sudo rm -f "$INSTALL_DIR/psiphon-tunnel-core-arm64"
   sudo rm -f "$INSTALL_DIR/psiphon.config"
 
-  # Remove Psiphon startup script
   sudo rm -f /usr/bin/psiphon
 
-  # Optionally, remove the installation directory (only if empty)
   sudo rmdir "$INSTALL_DIR" 2>/dev/null || true
 
-  # Reload systemd to remove the service
   sudo systemctl daemon-reload
 
   echo "Psiphon uninstalled successfully."
 }
 
-# Check for commands
 case "$1" in
   start)
     sudo systemctl start psiphon
@@ -141,24 +174,15 @@ case "$1" in
     sudo systemctl status psiphon
     ;;
   region)
-    if [ -z "$2" ]; then
-      echo "Please provide a region. Usage: psiphon region [region_code]"
-      exit 1
-    fi
+    [ -n "$2" ] || { echo "Please provide a region. Usage: psiphon region [region_code]"; exit 1; }
     update_region "$2"
     ;;
   httpport)
-    if [ -z "$2" ]; then
-      echo "Please provide an HTTP port. Usage: psiphon httpport [port_number]"
-      exit 1
-    fi
+    [ -n "$2" ] || { echo "Please provide an HTTP port. Usage: psiphon httpport [port_number]"; exit 1; }
     update_http_port "$2"
     ;;
   socksport)
-    if [ -z "$2" ]; then
-      echo "Please provide a SOCKS port. Usage: psiphon socksport [port_number]"
-      exit 1
-    fi
+    [ -n "$2" ] || { echo "Please provide a SOCKS port. Usage: psiphon socksport [port_number]"; exit 1; }
     update_socks_port "$2"
     ;;
   uninstall)
