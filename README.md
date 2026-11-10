@@ -101,7 +101,7 @@ psiphon [command] [argument]
 | `loglevel LEVEL` | Change log level: debug/info/warn/error | `sudo psiphon loglevel debug` |
 | `config` | Display current configuration (JSON) | `psiphon config` |
 
-Valid regions: `AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US`
+Valid regions: `AT AU BE BR CA CH CZ DE DK ES FI FR GB ID IE IN IT JP NL NO PL PT RO RS SE SG US`
 
 Notes:
 - Ports must be between 1 and 65535 and the HTTP and SOCKS ports must differ. They are stored as JSON numbers (Psiphon refuses to start if they are strings).

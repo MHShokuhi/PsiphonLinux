@@ -8,10 +8,10 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 022
 
 # ──────────────────────────────────────────────────────────────────────
-# Constants (MUST match the psiphon manager script)
+# Constants
 # ──────────────────────────────────────────────────────────────────────
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly REPO="MHShokuhi/PsiphonLinux"
 readonly BRANCH="main"
 readonly BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
@@ -80,7 +80,6 @@ cleanup() {
   return 0
 }
 
-# Restore a single backed-up file; remove it if it did not exist before.
 restore_one() {
   local name="$1" target="$2" mode="$3"
   if [[ -f "$BACKUP_DIR/$name" ]]; then
