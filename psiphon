@@ -1,236 +1,649 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# PsiphonLinux Manager
+# AMD64 only
+# SPDX-License-Identifier: MIT
 
-CONFIG_FILE="/etc/psiphon/psiphon.config"
-SERVICE_FILE="/etc/systemd/system/psiphon.service"
-INSTALL_DIR="/etc/psiphon"
+set -Eeuo pipefail
+shopt -s inherit_errexit 2>/dev/null || true
+umask 022
 
-show_help() {
-  echo "Usage: psiphon [start|stop|restart|status|region|httpport|socksport|ip|checkip|uninstall]"
-  echo
-  echo "start             - Start the Psiphon service."
-  echo "stop              - Stop the Psiphon service."
-  echo "restart           - Restart the Psiphon service."
-  echo "status            - Show the status of the Psiphon service."
-  echo "region [code]     - Set the EgressRegion to the specified region code."
-  echo "httpport [port]   - Set the LocalHttpProxyPort to the specified port."
-  echo "socksport [port]  - Set the LocalSocksProxyPort to the specified port."
-  echo "ip                - Show exit IP via Psiphon SOCKS proxy (dynamic port)."
-  echo "uninstall         - Uninstall Psiphon."
-  echo
-  echo "Valid region codes are: AT, BE, BG, CA, CH, CZ, DE, DK, EE, ES, FI, FR, GB, HU, IE, IN, IT, JP, LV, NL, NO, PL, RO, RS, SE, SG, SK, US"
-  echo "Port numbers must be between 1024 and 65535."
+# ──────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────
+
+readonly SCRIPT_VERSION="1.0.0"
+readonly REPO="MHShokuhi/PsiphonLinux"
+readonly BRANCH="main"
+readonly BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+
+readonly BINARY_SUBDIR="binary"
+
+readonly INSTALL_DIR="/etc/psiphon"
+readonly STATE_DIR="/var/lib/psiphon"
+readonly SERVICE_USER="psiphon"
+readonly BINARY_NAME="psiphon-tunnel-core-x86_64"
+readonly BINARY_PATH="${INSTALL_DIR}/${BINARY_NAME}"
+readonly CONFIG_FILE="${INSTALL_DIR}/psiphon.config"
+readonly SERVICE_FILE="/etc/systemd/system/psiphon.service"
+readonly CLI_PATH="/usr/bin/psiphon"
+readonly LOCK_FILE="/run/psiphon.lock"
+
+readonly START_WAIT_SECS=15
+readonly STABLE_SECS=5
+
+readonly -a BINARY_ARGS=(-config "$CONFIG_FILE" -dataRootDirectory "$STATE_DIR" -formatNotices)
+
+readonly -a CURL_PROTO_OPTS=(--proto '=https' --proto-redir '=https' --tlsv1.2)
+readonly -a CURL_OPTS=(--fail --location --silent --show-error --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15)
+
+readonly -a VALID_REGIONS=(
+  AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP
+  LV NL NO PL PT RO RS SE SG SK US
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+C_RESET="" C_BOLD="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE=""
+if [[ -t 1 ]] && have_cmd tput && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+  C_RESET="$(tput sgr0)"
+  C_BOLD="$(tput bold)"
+  C_RED="$(tput setaf 1)"
+  C_GREEN="$(tput setaf 2)"
+  C_YELLOW="$(tput setaf 3)"
+  C_BLUE="$(tput setaf 4)"
+fi
+
+log_info()    { printf '%s[INFO]%s %s\n'  "${C_BLUE}${C_BOLD}"   "${C_RESET}" "$*"; }
+log_warn()    { printf '%s[WARN]%s %s\n'  "${C_YELLOW}${C_BOLD}" "${C_RESET}" "$*" >&2; }
+log_error()   { printf '%s[ERROR]%s %s\n' "${C_RED}${C_BOLD}"    "${C_RESET}" "$*" >&2; }
+log_success() { printf '%s[OK]%s %s\n'    "${C_GREEN}${C_BOLD}"  "${C_RESET}" "$*"; }
+log_debug() {
+  if [[ "${PSIPHON_DEBUG:-0}" == "1" ]]; then
+    printf '[DEBUG] %s\n' "$*" >&2
+  fi
+  return 0
 }
 
-# Read SOCKS port from config dynamically; fallback to 1081
-get_socks_port() {
-  local port=""
-  if [ -f "$CONFIG_FILE" ]; then
-    port="$(grep -oE '"LocalSocksProxyPort"[[:space:]]*:[[:space:]]*[0-9]+' "$CONFIG_FILE" \
-      | head -n1 | grep -oE '[0-9]+' || true)"
-  fi
+die() { log_error "$*"; exit 1; }
 
-  if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-    echo "$port"
+require_cmds() {
+  local missing=() cmd
+  for cmd in "$@"; do
+    have_cmd "$cmd" || missing+=("$cmd")
+  done
+  [[ ${#missing[@]} -eq 0 ]] || die "Missing required commands: ${missing[*]}"
+}
+
+ORIG_ARGS=("$@")
+
+is_root() { [[ $EUID -eq 0 ]]; }
+
+require_root() {
+  is_root && return 0
+  have_cmd sudo || die "Root privileges required (sudo not found)."
+  local self
+  self="$(readlink -f -- "${BASH_SOURCE[0]}")"
+  if [[ -x "$self" ]]; then
+    exec sudo --preserve-env=PSIPHON_DEBUG -- "$self" "${ORIG_ARGS[@]}"
+  fi
+  exec sudo --preserve-env=PSIPHON_DEBUG -- bash "$self" "${ORIG_ARGS[@]}"
+}
+
+acquire_lock() {
+  have_cmd flock || return 0
+  exec 9>"$LOCK_FILE"
+  flock -w 30 9 || die "Another psiphon operation is in progress."
+}
+
+CLEANUP_DIR=""
+RESTART_SERVICE_ON_EXIT="no"
+
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$RESTART_SERVICE_ON_EXIT" == "yes" ]]; then
+    log_warn "Restoring the Psiphon service..."
+    systemctl start psiphon.service || log_error "Could not restart psiphon.service; check 'psiphon status'."
+  fi
+  if [[ -n "$CLEANUP_DIR" ]]; then
+    rm -rf -- "$CLEANUP_DIR"
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+
+fetch() {
+  curl "${CURL_OPTS[@]}" "${CURL_PROTO_OPTS[@]}" --max-time "$3" --output "$2" "$1"
+}
+
+atomic_write() {
+  local target="$1" mode="$2" tmp
+  tmp="$(mktemp -p "$(dirname -- "$target")" ".psiphon-atomic-XXXXXX")"
+  if ! { cat >"$tmp" && chmod "$mode" "$tmp" && { sync "$tmp" 2>/dev/null || true; } && mv -f -- "$tmp" "$target"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+read_sha_file() {
+  local digest
+  digest="$(awk 'NR==1 {print tolower($1)}' "$1")"
+  [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s' "$digest"
+}
+
+verify_elf_amd64() {
+  local file="$1" header
+  header="$(LC_ALL=C readelf -h "$file" 2>/dev/null)" || die "Not a valid ELF file."
+  grep -Eq 'Class:[[:space:]]+ELF64' <<<"$header" || die "Not a 64-bit ELF binary."
+  grep -Eq 'Machine:[[:space:]]+(Advanced Micro Devices X86-64|AMD x86-64)' <<<"$header" \
+    || die "Architecture mismatch (not x86_64)."
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────────────────────────────
+
+config_require() {
+  [[ -f "$CONFIG_FILE" ]] || die "Configuration not found at $CONFIG_FILE. Run the installer first."
+}
+
+config_get() {
+  jq -r --arg key "$1" '.[$key] // empty' "$CONFIG_FILE"
+}
+
+config_default() {
+  case "$1" in
+    LocalHttpProxyPort)  printf '8080' ;;
+    LocalSocksProxyPort) printf '1080' ;;
+    EgressRegion)        printf 'US' ;;
+    LogLevel)            printf 'info' ;;
+    *)                   printf '' ;;
+  esac
+}
+
+config_get_or_default() {
+  local val
+  val="$(config_get "$1")"
+  if [[ -n "$val" ]]; then
+    printf '%s' "$val"
   else
-    echo "1081"
+    config_default "$1"
   fi
 }
 
-# Wait until a TCP port is actually open (listening) on host:port
-wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local tries="${3:-30}"
-  local sleep_s="${4:-1}"
+validate_port() {
+  local raw="$1" n
+  if ! [[ "$raw" =~ ^[0-9]{1,5}$ ]]; then
+    log_error "Port must be a positive integer."
+    return 1
+  fi
+  n=$((10#$raw))
+  if (( n < 1 || n > 65535 )); then
+    log_error "Port must be between 1 and 65535."
+    return 1
+  fi
+  printf '%d' "$n"
+}
 
-  for _ in $(seq 1 "$tries"); do
-    (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1 && return 0
-    sleep "$sleep_s"
+validate_region() {
+  local upper="${1^^}" valid
+  for valid in "${VALID_REGIONS[@]}"; do
+    if [[ "$upper" == "$valid" ]]; then
+      printf '%s' "$upper"
+      return 0
+    fi
+  done
+  log_error "Invalid region: $1. Valid: ${VALID_REGIONS[*]}"
+  return 1
+}
+
+validate_loglevel() {
+  local lower="${1,,}"
+  case "$lower" in
+    debug|info|warn|error) printf '%s' "$lower" ;;
+    *) log_error "Invalid LogLevel: $1. Valid: debug, info, warn, error"; return 1 ;;
+  esac
+}
+
+prune_config_backups() {
+  local -a baks
+  local i count
+  shopt -s nullglob
+  baks=("${CONFIG_FILE}".bak.*)
+  shopt -u nullglob
+  count=${#baks[@]}
+  for (( i = 0; i < count - 5; i++ )); do
+    rm -f -- "${baks[i]}"
+  done
+}
+
+config_set() {
+  local key="$1" raw="$2" value filter other_key other_val
+  require_root
+  require_cmds jq
+  acquire_lock
+  config_require
+
+  case "$key" in
+    LocalHttpProxyPort|LocalSocksProxyPort)
+      value="$(validate_port "$raw")"
+      if [[ "$key" == "LocalHttpProxyPort" ]]; then other_key="LocalSocksProxyPort"; else other_key="LocalHttpProxyPort"; fi
+      other_val="$(config_get_or_default "$other_key")"
+      [[ "$value" != "$other_val" ]] || die "HTTP and SOCKS proxy ports must be different (both would be $value)."
+      filter='.[$k] = ($v | tonumber)'
+      ;;
+    EgressRegion)
+      value="$(validate_region "$raw")"
+      filter='.[$k] = $v'
+      ;;
+    LogLevel)
+      value="$(validate_loglevel "$raw")"
+      filter='.[$k] = $v | .EmitDiagnosticNotices = ($v == "debug")'
+      ;;
+    *)
+      die "Unsupported configuration key: $key"
+      ;;
+  esac
+
+  local backup new_json
+  backup="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a -- "$CONFIG_FILE" "$backup"
+
+  new_json="$(jq --arg k "$key" --arg v "$value" "$filter" "$CONFIG_FILE")" \
+    || die "Failed to update configuration (existing file left untouched)."
+  [[ -n "$new_json" ]] || die "Refusing to write an empty configuration."
+
+  atomic_write "$CONFIG_FILE" 644 <<<"$new_json"
+  prune_config_backups
+  log_success "Configuration updated: $key = $value (backup: $backup)"
+
+  if service_active; then
+    systemctl restart psiphon.service
+    if wait_service_stable; then
+      log_info "Psiphon service restarted."
+    else
+      log_error "Service did not stay up with the new configuration. Restoring the previous one."
+      atomic_write "$CONFIG_FILE" 644 <"$backup"
+      systemctl restart psiphon.service || true
+      die "Configuration change reverted."
+    fi
+  else
+    log_warn "Service not running; changes apply on next start."
+  fi
+}
+
+config_show() {
+  require_cmds jq
+  config_require
+  jq '.' "$CONFIG_FILE"
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Service management
+# ──────────────────────────────────────────────────────────────────────
+
+has_systemd() { have_cmd systemctl && [[ -f "$SERVICE_FILE" ]]; }
+
+service_active() { has_systemd && systemctl is-active --quiet psiphon.service; }
+
+wait_service_stable() {
+  local waited=0 stable=0
+  while (( waited < START_WAIT_SECS )); do
+    if systemctl is-active --quiet psiphon.service; then
+      stable=$((stable + 1))
+      if (( stable >= STABLE_SECS )); then
+        return 0
+      fi
+    else
+      stable=0
+    fi
+    sleep 1
+    waited=$((waited + 1))
   done
   return 1
 }
 
-print_proxy_ip() {
-  local socks_port
-  socks_port="$(get_socks_port)"
-
-  # 1) ensure service is active
-  if ! systemctl is-active --quiet psiphon; then
-    printf "[%s] Proxy IP (SOCKS:%s): (service not active)\n" "$(date '+%F %T')" "$socks_port"
-    return 1
-  fi
-
-  # 2) wait until SOCKS port is listening
-  if ! wait_for_port "127.0.0.1" "$socks_port" 30 1; then
-    if ! wait_for_port "localhost" "$socks_port" 10 1; then
-      printf "[%s] Proxy IP (SOCKS:%s): (port not ready)\n" "$(date '+%F %T')" "$socks_port"
-      return 1
-    fi
-  fi
-
-  # 3) fetch IP with retries
-  local ip=""
-  local err=""
-  for _ in $(seq 1 10); do
-    err="$(mktemp)"
-    ip="$(curl -sS --fail \
-      --connect-timeout 3 --max-time 8 \
-      -x "socks5h://127.0.0.1:${socks_port}" \
-      https://ifconfig.me 2>"$err" || true)"
-    ip="$(echo "$ip" | tr -d '[:space:]')"
-
-    if [ -n "$ip" ]; then
-      rm -f "$err"
-      printf "[%s] Proxy IP (SOCKS:%s): %s\n" "$(date '+%F %T')" "$socks_port" "$ip"
-      return 0
-    fi
-
+wait_service_stopped() {
+  local waited=0
+  while systemctl is-active --quiet psiphon.service && (( waited < 10 )); do
     sleep 1
-    rm -f "$err"
+    waited=$((waited + 1))
   done
+  if systemctl is-active --quiet psiphon.service; then
+    log_warn "Service did not stop cleanly; continuing anyway."
+  fi
+  return 0
+}
 
-  # last error message
-  err="$(mktemp)"
-  ip="$(curl -sS --fail \
-    --connect-timeout 3 --max-time 8 \
-    -x "socks5h://127.0.0.1:${socks_port}" \
-    https://ifconfig.me 2>"$err" || true)"
-  ip="$(echo "$ip" | tr -d '[:space:]')"
+service_start() {
+  has_systemd || die "Systemd service not installed. Use 'psiphon run' for foreground."
+  require_root
+  systemctl start psiphon.service
+  systemctl status psiphon.service --no-pager || true
+}
 
-  if [ -n "$ip" ]; then
-    rm -f "$err"
-    printf "[%s] Proxy IP (SOCKS:%s): %s\n" "$(date '+%F %T')" "$socks_port" "$ip"
+service_stop() {
+  has_systemd || die "Systemd service not installed."
+  require_root
+  systemctl stop psiphon.service
+  log_info "Psiphon stopped."
+}
+
+service_restart() {
+  has_systemd || die "Systemd service not installed."
+  require_root
+  systemctl restart psiphon.service
+  systemctl status psiphon.service --no-pager || true
+}
+
+service_enable() {
+  has_systemd || die "Systemd service not installed."
+  require_root
+  systemctl enable psiphon.service
+  log_info "Psiphon will start automatically at boot."
+}
+
+service_disable() {
+  has_systemd || die "Systemd service not installed."
+  require_root
+  systemctl disable psiphon.service
+  log_info "Psiphon automatic startup disabled."
+}
+
+service_status() {
+  has_systemd || die "Systemd service not installed."
+  systemctl status psiphon.service --no-pager
+}
+
+service_logs() {
+  has_systemd || die "Systemd service not installed."
+  require_root
+  journalctl -u psiphon.service -n 100 -f --no-pager
+}
+
+run_foreground() {
+  require_root
+  [[ -x "$BINARY_PATH" ]] || die "Binary not found at $BINARY_PATH. Run the installer first."
+  [[ -f "$CONFIG_FILE" ]] || die "Configuration not found at $CONFIG_FILE."
+  if service_active; then
+    die "Psiphon is already running via systemd. Stop it first: psiphon stop"
+  fi
+  id -u "$SERVICE_USER" >/dev/null 2>&1 || die "System user '$SERVICE_USER' not found. Re-run the installer."
+
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 750 "$STATE_DIR"
+
+  log_info "Starting Psiphon in foreground as '$SERVICE_USER' (Ctrl+C to stop)..."
+  if have_cmd setpriv; then
+    exec setpriv --reuid="$SERVICE_USER" --regid="$SERVICE_USER" --clear-groups --no-new-privs \
+      "$BINARY_PATH" "${BINARY_ARGS[@]}"
+  elif have_cmd runuser; then
+    exec runuser -u "$SERVICE_USER" -- "$BINARY_PATH" "${BINARY_ARGS[@]}"
+  fi
+  die "setpriv or runuser (util-linux) is required to drop privileges."
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Binary update
+# ──────────────────────────────────────────────────────────────────────
+
+update_binary() {
+  require_root
+  acquire_lock
+  [[ -x "$BINARY_PATH" ]] || die "Binary not found. Run the installer first."
+  require_cmds curl sha256sum readelf install awk grep mktemp
+
+  local tmp
+  tmp="$(mktemp -d -t psiphon-update-XXXXXX)"
+  CLEANUP_DIR="$tmp"
+
+  log_info "Downloading latest binary..."
+  fetch "$BASE_URL/${BINARY_SUBDIR}/${BINARY_NAME}" "$tmp/$BINARY_NAME" 600 || die "Binary download failed."
+  log_info "Downloading checksum..."
+  fetch "$BASE_URL/${BINARY_SUBDIR}/${BINARY_NAME}.sha256" "$tmp/checksum" 30 || die "Checksum download failed (refusing to update without one)."
+
+  local expected actual
+  expected="$(read_sha_file "$tmp/checksum")" || die "Invalid checksum file."
+  actual="$(sha256sum "$tmp/$BINARY_NAME" | awk '{print $1}')"
+  log_info "Verifying SHA256..."
+  [[ "$actual" == "$expected" ]] || die "Checksum mismatch (expected $expected, got $actual)."
+
+  log_info "Verifying binary format..."
+  verify_elf_amd64 "$tmp/$BINARY_NAME"
+
+  local current
+  current="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+  if [[ "$current" == "$expected" ]]; then
+    log_success "Already up to date (SHA256: $expected)."
     return 0
   fi
 
-  printf "[%s] Proxy IP (SOCKS:%s): (curl failed) - %s\n" "$(date '+%F %T')" "$socks_port" "$(tr '\n' ' ' < "$err")"
-  rm -f "$err"
-  return 1
-}
+  local staged="${BINARY_PATH}.new"
+  install -m 755 "$tmp/$BINARY_NAME" "$staged"
+  log_info "Smoke-testing new binary..."
+  if ! timeout 15 "$staged" -v >/dev/null 2>&1; then
+    rm -f -- "$staged"
+    die "New binary failed to run on this system. Keeping the current one."
+  fi
 
-restart_service() {
-  sudo systemctl restart psiphon
-  echo "Psiphon service has been restarted."
-  print_proxy_ip || true
-}
+  cp -a -- "$BINARY_PATH" "$tmp/previous-binary"
 
-update_region() {
-  local new_region=$1
-  local valid_regions=("AT" "BE" "BG" "CA" "CH" "CZ" "DE" "DK" "EE" "ES" "FI" "FR" "GB" "HU" "IE" "IN" "IT" "JP" "LV" "NL" "NO" "PL" "RO" "RS" "SE" "SG" "SK" "US")
+  local was_active="no"
+  if service_active; then
+    was_active="yes"
+    log_info "Stopping Psiphon service for update..."
+    RESTART_SERVICE_ON_EXIT="yes"
+    systemctl stop psiphon.service
+    wait_service_stopped
+  fi
 
-  if [[ " ${valid_regions[*]} " =~ " ${new_region} " ]]; then
-    if [ -f "$CONFIG_FILE" ]; then
-      echo "Updating region to $new_region..."
-      sudo sed -i "s/\"EgressRegion\":\"[^\"]*\"/\"EgressRegion\":\"$new_region\"/" "$CONFIG_FILE"
-      echo "Region updated to $new_region."
-      restart_service
-    else
-      echo "Error: Config file not found!"
-      exit 1
+  mv -f -- "$staged" "$BINARY_PATH"
+
+  if [[ "$was_active" == "yes" ]]; then
+    log_info "Starting service with new binary..."
+    systemctl start psiphon.service || true
+    if ! wait_service_stable; then
+      log_warn "New binary did not stay up. Rolling back."
+      systemctl stop psiphon.service 2>/dev/null || true
+      install -m 755 "$tmp/previous-binary" "${BINARY_PATH}.new"
+      mv -f -- "${BINARY_PATH}.new" "$BINARY_PATH"
+      systemctl start psiphon.service || log_error "Rollback restart failed; check 'psiphon logs'."
+      RESTART_SERVICE_ON_EXIT="no"
+      die "Update failed. Previous binary restored."
     fi
-  else
-    echo "Invalid region: $new_region"
-    echo "Valid regions are: ${valid_regions[*]}"
-    exit 1
+    RESTART_SERVICE_ON_EXIT="no"
+  fi
+
+  log_success "Psiphon binary updated successfully."
+  log_info "SHA256: $expected"
+  if [[ "$was_active" == "no" ]]; then
+    log_info "Service was not running; binary updated without starting."
   fi
 }
 
-update_http_port() {
-  local new_http_port=$1
-  if [[ "$new_http_port" =~ ^[0-9]+$ ]] && [ "$new_http_port" -ge 1024 ] && [ "$new_http_port" -le 65535 ]; then
-    if [ -f "$CONFIG_FILE" ]; then
-      echo "Updating HTTP proxy port to $new_http_port..."
-      sudo sed -i "s/\"LocalHttpProxyPort\":[0-9]*/\"LocalHttpProxyPort\":$new_http_port/" "$CONFIG_FILE"
-      echo "HTTP proxy port updated to $new_http_port."
-      restart_service
-    else
-      echo "Error: Config file not found!"
-      exit 1
-    fi
+# ──────────────────────────────────────────────────────────────────────
+# Diagnostics
+# ──────────────────────────────────────────────────────────────────────
+
+show_exit_ip() {
+  [[ -x "$BINARY_PATH" ]] || die "Binary not found. Run the installer first."
+  require_cmds curl jq
+  config_require
+
+  local socks_port
+  socks_port="$(config_get_or_default LocalSocksProxyPort)"
+  [[ "$socks_port" =~ ^[0-9]+$ ]] || die "Invalid SOCKS port in configuration."
+
+  if has_systemd && ! service_active; then
+    log_warn "Psiphon service is not active. Start it first: psiphon start"
+    return 1
+  fi
+
+  log_info "Checking external IP through SOCKS5 port $socks_port..."
+  local ip
+  ip="$(
+    curl --fail --silent --show-error \
+      --connect-timeout 5 --max-time 20 \
+      --socks5-hostname "127.0.0.1:$socks_port" \
+      https://api.ipify.org
+  )" || die "Unable to retrieve IP through Psiphon."
+
+  [[ "$ip" =~ ^[0-9a-fA-F:.]+$ ]] || die "Unexpected IP response."
+  log_success "Psiphon exit IP: $ip"
+}
+
+show_version() {
+  [[ -x "$BINARY_PATH" ]] || die "Binary not found. Run the installer first."
+  echo "PsiphonLinux Manager: $SCRIPT_VERSION"
+  echo "Architecture: AMD64 (x86_64)"
+  echo "Binary: $BINARY_PATH"
+  echo "Binary SHA256: $(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+  timeout 10 "$BINARY_PATH" -v 2>&1 | sed 's/^/  /' || true
+  echo "Config: $CONFIG_FILE"
+  echo
+  if has_systemd; then
+    systemctl show psiphon.service -p ActiveState -p SubState -p LoadState --no-pager
   else
-    echo "Invalid HTTP port: $new_http_port"
-    echo "Port must be a number between 1024 and 65535."
-    exit 1
+    echo "Systemd service: not installed"
   fi
 }
 
-update_socks_port() {
-  local new_socks_port=$1
-  if [[ "$new_socks_port" =~ ^[0-9]+$ ]] && [ "$new_socks_port" -ge 1024 ] && [ "$new_socks_port" -le 65535 ]; then
-    if [ -f "$CONFIG_FILE" ]; then
-      echo "Updating SOCKS proxy port to $new_socks_port..."
-      sudo sed -i "s/\"LocalSocksProxyPort\":[0-9]*/\"LocalSocksProxyPort\":$new_socks_port/" "$CONFIG_FILE"
-      echo "SOCKS proxy port updated to $new_socks_port."
-      restart_service
-    else
-      echo "Error: Config file not found!"
-      exit 1
-    fi
-  else
-    echo "Invalid SOCKS port: $new_socks_port"
-    echo "Port must be a number between 1024 and 65535."
-    exit 1
-  fi
-}
+# ──────────────────────────────────────────────────────────────────────
+# Uninstall
+# ──────────────────────────────────────────────────────────────────────
 
 uninstall() {
-  echo "Uninstalling Psiphon..."
+  local assume_yes="no"
+  [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && assume_yes="yes"
+  require_root
+  acquire_lock
 
-  sudo systemctl stop psiphon 2>/dev/null || true
-  sudo systemctl disable psiphon 2>/dev/null || true
+  echo "This will completely remove Psiphon:"
+  echo "  - Binary: $BINARY_PATH"
+  echo "  - Config: $CONFIG_FILE (and backups)"
+  echo "  - Data:   $STATE_DIR"
+  echo "  - Service: $SERVICE_FILE"
+  echo "  - System user: $SERVICE_USER"
+  echo "  - CLI: $CLI_PATH"
+  if [[ "$assume_yes" != "yes" ]]; then
+    [[ -t 0 ]] || die "Not a terminal; re-run with: psiphon uninstall -y"
+    local answer=""
+    read -rp "Continue? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || { log_info "Aborted."; return 0; }
+  fi
 
-  sudo rm -f "$SERVICE_FILE"
+  if have_cmd systemctl; then
+    log_info "Stopping and disabling service..."
+    systemctl disable --now psiphon.service 2>/dev/null || true
+    rm -f -- "$SERVICE_FILE"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed psiphon.service 2>/dev/null || true
+  fi
 
-  sudo rm -f "$INSTALL_DIR/psiphon-tunnel-core-x86_64"
-  sudo rm -f "$INSTALL_DIR/psiphon-tunnel-core-arm64"
-  sudo rm -f "$INSTALL_DIR/psiphon.config"
+  rm -f -- "$BINARY_PATH" "${BINARY_PATH}.new" "$CONFIG_FILE"
+  rm -f -- "${CONFIG_FILE}".bak.*
+  rm -rf -- "$STATE_DIR"
+  rmdir "$INSTALL_DIR" 2>/dev/null || true
 
-  sudo rm -f /usr/bin/psiphon
+  if id -u "$SERVICE_USER" >/dev/null 2>&1 && [[ "$(id -u "$SERVICE_USER")" -lt 1000 ]] && have_cmd userdel; then
+    userdel "$SERVICE_USER" 2>/dev/null || true
+  fi
 
-  sudo rmdir "$INSTALL_DIR" 2>/dev/null || true
-
-  sudo systemctl daemon-reload
-  echo "Psiphon uninstalled successfully."
+  log_success "Psiphon uninstalled."
+  rm -f -- "$CLI_PATH"
 }
 
-case "$1" in
-  start)
-    sudo systemctl start psiphon
-    echo "Psiphon service started."
-    ;;
-  stop)
-    sudo systemctl stop psiphon
-    echo "Psiphon service stopped."
-    ;;
-  restart)
-    restart_service
-    ;;
-  status)
-    sudo systemctl status psiphon
-    ;;
-  region)
-    [ -n "$2" ] || { echo "Please provide a region. Usage: psiphon region [region_code]"; exit 1; }
-    update_region "$2"
-    ;;
-  httpport)
-    [ -n "$2" ] || { echo "Please provide an HTTP port. Usage: psiphon httpport [port_number]"; exit 1; }
-    update_http_port "$2"
-    ;;
-  socksport)
-    [ -n "$2" ] || { echo "Please provide a SOCKS port. Usage: psiphon socksport [port_number]"; exit 1; }
-    update_socks_port "$2"
-    ;;
-  ip)
-    print_proxy_ip
-    ;;
-  uninstall)
-    uninstall
-    ;;
-  ""|help|-h|--help)
-    show_help
-    ;;
-  *)
-    show_help
-    exit 1
-    ;;
-esac
+# ──────────────────────────────────────────────────────────────────────
+# Help
+# ──────────────────────────────────────────────────────────────────────
+
+show_help() {
+  cat <<EOF
+PsiphonLinux Manager v${SCRIPT_VERSION}
+Usage: psiphon COMMAND [ARGUMENT]
+
+Service Management:
+  start                 Start systemd service
+  stop                  Stop systemd service
+  restart               Restart systemd service
+  status                Show detailed service status
+  enable                Enable automatic startup at boot
+  disable               Disable automatic startup
+  run                   Run in foreground as the '${SERVICE_USER}' user (Ctrl+C to stop)
+  logs                  Follow systemd journal logs
+
+Maintenance:
+  update                Download and verify latest binary from GitHub
+  version               Show version, checksum, and service state
+  ip, checkip           Show current exit IP through Psiphon SOCKS proxy
+
+Configuration:
+  region CODE           Change egress region (e.g., DE, US, JP)
+  httpport PORT         Change HTTP proxy port (default: 8080)
+  socksport PORT        Change SOCKS proxy port (default: 1080)
+  loglevel LEVEL        Change log level: debug, info, warn, error
+  config                Display current configuration (JSON)
+
+Other:
+  uninstall [-y]        Remove Psiphon completely
+  help, -h, --help      Show this help
+
+Valid Regions:
+  ${VALID_REGIONS[*]}
+
+Examples:
+  sudo psiphon region DE
+  sudo psiphon httpport 8081
+  sudo psiphon update
+  sudo psiphon logs
+  psiphon config
+  psiphon ip
+
+Environment:
+  PSIPHON_DEBUG=1       Enable debug output
+EOF
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Main dispatch
+# ──────────────────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    start)        service_start ;;
+    stop)         service_stop ;;
+    restart)      service_restart ;;
+    status)       service_status ;;
+    enable)       service_enable ;;
+    disable)      service_disable ;;
+    run)          run_foreground ;;
+    logs)         service_logs ;;
+
+    update)       update_binary ;;
+    version)      show_version ;;
+    ip|checkip)   show_exit_ip ;;
+
+    region)       [[ $# -eq 1 ]] || die "Usage: psiphon region CODE";    config_set EgressRegion "$1" ;;
+    httpport)     [[ $# -eq 1 ]] || die "Usage: psiphon httpport PORT";  config_set LocalHttpProxyPort "$1" ;;
+    socksport)    [[ $# -eq 1 ]] || die "Usage: psiphon socksport PORT"; config_set LocalSocksProxyPort "$1" ;;
+    loglevel)     [[ $# -eq 1 ]] || die "Usage: psiphon loglevel LEVEL"; config_set LogLevel "$1" ;;
+    config)       config_show ;;
+
+    uninstall)    uninstall "$@" ;;
+    help|-h|--help) show_help ;;
+    *)
+      log_error "Unknown command: $cmd"
+      show_help >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

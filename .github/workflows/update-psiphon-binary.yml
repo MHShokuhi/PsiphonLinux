@@ -1,0 +1,133 @@
+name: Update Psiphon Binary
+
+on:
+  schedule:
+    # Every 6 hours at minute 17
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Commit even if the binary is unchanged"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: psiphon-binary-sync
+  # Never cancel a run that may be in the middle of pushing
+  cancel-in-progress: false
+
+env:
+  SOURCE_URL: https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64
+  BINARY_NAME: psiphon-tunnel-core-x86_64
+
+jobs:
+  sync:
+    name: Sync, validate and publish official AMD64 binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq shellcheck systemd binutils curl python3-yaml
+
+      - name: Download and validate official binary
+        id: fetch
+        env:
+          FORCE_UPDATE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          set -Eeuo pipefail
+
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          echo "Downloading official Psiphon AMD64 binary from Psiphon-Labs..."
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 600 \
+            --output "$tmp/$BINARY_NAME" "$SOURCE_URL"
+
+          size="$(stat -c %s "$tmp/$BINARY_NAME")"
+          if (( size < 1048576 )); then
+            echo "::error::Downloaded file is only $size bytes; refusing to publish it."
+            exit 1
+          fi
+
+          header="$(LC_ALL=C readelf -h "$tmp/$BINARY_NAME")"
+          grep -Eq 'Class:[[:space:]]+ELF64' <<<"$header" || { echo "::error::Not ELF64"; exit 1; }
+          grep -Eq 'Machine:[[:space:]]+(Advanced Micro Devices X86-64|AMD x86-64)' <<<"$header" || { echo "::error::Not AMD64"; exit 1; }
+
+          # The binary has to actually run on a Linux x86_64 host
+          chmod 755 "$tmp/$BINARY_NAME"
+          timeout 20 "$tmp/$BINARY_NAME" -v | tee "$tmp/version.txt"
+
+          new_sha="$(sha256sum "$tmp/$BINARY_NAME" | awk '{print $1}')"
+          echo "sha256=$new_sha" >> "$GITHUB_OUTPUT"
+
+          old_sha=""
+          if [[ -f "binary/$BINARY_NAME.sha256" ]]; then
+            old_sha="$(awk 'NR==1 {print tolower($1)}' "binary/$BINARY_NAME.sha256")"
+          fi
+
+          if [[ "$new_sha" == "$old_sha" && "$FORCE_UPDATE" != "true" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Binary unchanged ($new_sha)."
+            exit 0
+          fi
+
+          mkdir -p binary
+          cp -- "$tmp/$BINARY_NAME" "binary/$BINARY_NAME"
+          printf '%s  %s\n' "$new_sha" "$BINARY_NAME" > "binary/$BINARY_NAME.sha256"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Binary updated ($new_sha)."
+
+      # Runs the whole suite against the NEW binary (checksum, ELF, loads the
+      # default config, update/rollback logic) before anything is committed.
+      - name: Test with the new binary
+        if: steps.fetch.outputs.changed == 'true'
+        run: bash tests/test.sh
+
+      - name: Commit and push
+        if: steps.fetch.outputs.changed == 'true'
+        env:
+          NEW_SHA: ${{ steps.fetch.outputs.sha256 }}
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "binary/$BINARY_NAME" "binary/$BINARY_NAME.sha256"
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: update official Psiphon AMD64 binary to ${NEW_SHA:0:12}"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Summary
+        if: always()
+        env:
+          CHANGED: ${{ steps.fetch.outputs.changed }}
+          NEW_SHA: ${{ steps.fetch.outputs.sha256 }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "## Psiphon Binary Sync"
+            echo
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| Source | Psiphon-Labs (official) |"
+            echo "| Architecture | AMD64 (x86_64) |"
+            echo "| Binary changed | ${CHANGED:-unknown} |"
+            [[ -n "$NEW_SHA" ]] && echo "| SHA256 | \`${NEW_SHA}\` |"
+            echo "| Job status | ${JOB_STATUS} |"
+          } >> "$GITHUB_STEP_SUMMARY"

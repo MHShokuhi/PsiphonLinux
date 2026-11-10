@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PsiphonLinux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq shellcheck systemd binutils curl python3-yaml
+
+      - name: Check shell syntax
+        run: |
+          bash -n pinstaller.sh
+          bash -n psiphon
+          bash -n tests/test.sh
+
+      - name: ShellCheck (errors, blocking)
+        run: shellcheck --severity=error pinstaller.sh psiphon tests/test.sh
+
+      - name: ShellCheck (warnings, informational)
+        if: always()
+        run: shellcheck --severity=warning pinstaller.sh psiphon tests/test.sh || true
+
+      - name: Run test suite
+        run: bash tests/test.sh
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## Tests: ${{ job.status }}"
+            echo
+            echo "See the 'Run test suite' step for the per-check results."
+          } >> "$GITHUB_STEP_SUMMARY"

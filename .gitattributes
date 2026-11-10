@@ -1,0 +1,4 @@
+# Keep line endings as LF everywhere (a BOM/CRLF in psiphon.config makes Psiphon refuse to start)
+* text=auto eol=lf
+binary/psiphon-tunnel-core-x86_64 binary
+*.sha256 text eol=lf
