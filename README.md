@@ -174,7 +174,7 @@ The installed service includes:
 - `NoNewPrivileges=true`, `PrivateTmp=true`, `PrivateDevices=true`
 - `ProtectSystem=strict`, `ProtectHome=true`, kernel/clock/hostname protections
 - `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK`, `RestrictNamespaces=true`
-- `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` (uncomment from service file if you need ports <1024)
+- `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` (only needed for ports <1024; remove both capability lines otherwise)
 - `Restart=on-failure` with `RestartSec=5s`
 - Resource limits: `LimitNOFILE=65536`
 
