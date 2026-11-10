@@ -2,8 +2,7 @@ name: Update Psiphon Binary
 
 on:
   schedule:
-    # Every 6 hours at minute 17
-    - cron: "17 */6 * * *"
+    - cron: "0 4 */2 * *"
   workflow_dispatch:
     inputs:
       force:
@@ -16,7 +15,6 @@ permissions:
 
 concurrency:
   group: psiphon-binary-sync
-  # Never cancel a run that may be in the middle of pushing
   cancel-in-progress: false
 
 env:
@@ -90,8 +88,6 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "Binary updated ($new_sha)."
 
-      # Runs the whole suite against the NEW binary (checksum, ELF, loads the
-      # default config, update/rollback logic) before anything is committed.
       - name: Test with the new binary
         if: steps.fetch.outputs.changed == 'true'
         run: bash tests/test.sh

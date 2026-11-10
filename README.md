@@ -201,7 +201,7 @@ Trust model: the checksum lives in the same repository as the binary, so it prot
 ## GitHub Actions (for maintainers)
 
 - **`.github/workflows/tests.yml`** — Runs on every push/PR: syntax, ShellCheck, then `tests/test.sh`
-- **`.github/workflows/update-psiphon-binary.yml`** — Runs every 6 hours in a single job: fetches the official binary from Psiphon-Labs, validates it (size, ELF, runs `-v`), runs the full test suite against it, and only then commits to `binary/` if it changed. If `main` is branch-protected, allow `github-actions[bot]` to push or switch the workflow to open a pull request.
+- **`.github/workflows/update-psiphon-binary.yml`** — Runs every 2 days in a single job: fetches the official binary from Psiphon-Labs [binaries repo](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/), validates it (size, ELF, runs `-v`), runs the full test suite against it, and only then commits to `binary/` if it changed. If `main` is branch-protected, allow `github-actions[bot]` to push or switch the workflow to open a pull request.
 
 ### Running the tests
 
