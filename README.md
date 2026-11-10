@@ -129,7 +129,7 @@ sudo psiphon status
 sudo psiphon region DE
 
 # Change HTTP proxy port
-sudo psiphon httpport 8081
+sudo psiphon httpport 40005
 
 # View current config
 psiphon config
@@ -223,7 +223,7 @@ git update-index --chmod=+x pinstaller.sh psiphon tests/test.sh
 |---------|-------|
 | Service keeps restarting | `sudo psiphon logs`; a config error shows as `error processing configuration file` |
 | `psiphon ip` fails | Service must be running; the first connection can take a minute |
-| Port already in use | `sudo psiphon httpport 8081` / `socksport 1081` |
+| Port already in use | `sudo psiphon httpport 40005` / `socksport 40004` |
 | Upgrading from 1.0.x | Just re-run the installer; your config is kept (and repaired if it has a BOM or string ports). The service now runs as `psiphon`, not root |
 
 ## License

@@ -171,7 +171,7 @@ BIN="$ROOT/binary/psiphon-tunnel-core-x86_64"
 if [[ "$(uname -m)" == "x86_64" && -f "$BIN" ]]; then
   cp -- "$BIN" "$TMP/ptc"
   chmod 755 "$TMP/ptc"
-  sed -E -e 's/("LocalHttpProxyPort": )40005/\1440005/' -e 's/("LocalSocksProxyPort": )40004/\1440004/' "$CFG" >"$TMP/ptc.config"
+  sed -E -e 's/("LocalHttpProxyPort": )40005/\50005/' -e 's/("LocalSocksProxyPort": )40004/\50004/' "$CFG" >"$TMP/ptc.config"
   mkdir -p "$TMP/ptc-data"
   out="$(timeout 6 "$TMP/ptc" -config "$TMP/ptc.config" -dataRootDirectory "$TMP/ptc-data" -formatNotices 2>&1 || true)"
   if grep -q 'ListeningSocksProxyPort' <<<"$out" && ! grep -q 'error processing configuration file' <<<"$out"; then
@@ -324,8 +324,8 @@ STUB
     check_not "region XX -> rejected" sb region XX
     expect_eq "Rejected region leaves config untouched" "$before" "$(sha_of "$SB/etc/psiphon.config")"
 
-    check "httpport 8081 -> accepted" sb httpport 8081
-    expect_eq "httpport value" "8081" "$(cfg_get LocalHttpProxyPort)"
+    check "httpport 40005 -> accepted" sb httpport 40005
+    expect_eq "httpport value" "40005" "$(cfg_get LocalHttpProxyPort)"
     expect_eq "httpport stored as JSON number (not string)" "number" "$(jq -r '.LocalHttpProxyPort | type' "$SB/etc/psiphon.config")"
     check "socksport 0010 -> accepted (no octal surprise)" sb socksport 0010
     expect_eq "socksport 0010 -> 10" "10" "$(cfg_get LocalSocksProxyPort)"
@@ -333,8 +333,8 @@ STUB
     for bad in 0 65536 70000 abc -5 "" "8 0" 1e3; do
       check_not "port '$bad' rejected" sb httpport "$bad"
     done
-    check_not "equal HTTP/SOCKS ports rejected" sb socksport 8081
-    expect_eq "HTTP port unchanged after rejections" "8081" "$(cfg_get LocalHttpProxyPort)"
+    check_not "equal HTTP/SOCKS ports rejected" sb socksport 40005
+    expect_eq "HTTP port unchanged after rejections" "40005" "$(cfg_get LocalHttpProxyPort)"
 
     check "loglevel DEBUG -> accepted" sb loglevel DEBUG
     expect_eq "loglevel stored lower-case" "debug" "$(cfg_get LogLevel)"

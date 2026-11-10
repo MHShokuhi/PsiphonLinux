@@ -11,7 +11,7 @@ umask 022
 # Constants (MUST match the psiphon manager script)
 # ──────────────────────────────────────────────────────────────────────
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly REPO="MHShokuhi/PsiphonLinux"
 readonly BRANCH="main"
 readonly BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
@@ -257,9 +257,6 @@ else
   cp -- "$CONFIG_PATH" "$TEMP_DIR/psiphon.config.raw"
 fi
 
-# Normalise: strip a UTF-8 BOM and CRs (Psiphon's JSON parser rejects a BOM) and
-# make sure the proxy ports are JSON numbers (it rejects strings such as "8081").
-# Only the 3-byte BOM at the very start of the file is removed.
 if [[ "$(head -c 3 "$TEMP_DIR/psiphon.config.raw" | od -An -tx1 | tr -d ' \n')" == "efbbbf" ]]; then
   tail -c +4 "$TEMP_DIR/psiphon.config.raw" >"$TEMP_DIR/psiphon.config.nobom"
 else
