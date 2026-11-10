@@ -171,7 +171,7 @@ BIN="$ROOT/binary/psiphon-tunnel-core-x86_64"
 if [[ "$(uname -m)" == "x86_64" && -f "$BIN" ]]; then
   cp -- "$BIN" "$TMP/ptc"
   chmod 755 "$TMP/ptc"
-  sed -E -e 's/("LocalHttpProxyPort": )8080/\148080/' -e 's/("LocalSocksProxyPort": )1080/\141080/' "$CFG" >"$TMP/ptc.config"
+  sed -E -e 's/("LocalHttpProxyPort": )40005/\1440005/' -e 's/("LocalSocksProxyPort": )40004/\1440004/' "$CFG" >"$TMP/ptc.config"
   mkdir -p "$TMP/ptc-data"
   out="$(timeout 6 "$TMP/ptc" -config "$TMP/ptc.config" -dataRootDirectory "$TMP/ptc-data" -formatNotices 2>&1 || true)"
   if grep -q 'ListeningSocksProxyPort' <<<"$out" && ! grep -q 'error processing configuration file' <<<"$out"; then

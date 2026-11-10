@@ -158,8 +158,8 @@ config_get() {
 
 config_default() {
   case "$1" in
-    LocalHttpProxyPort)  printf '8080' ;;
-    LocalSocksProxyPort) printf '1080' ;;
+    LocalHttpProxyPort)  printf '40005' ;;
+    LocalSocksProxyPort) printf '40004' ;;
     EgressRegion)        printf 'US' ;;
     LogLevel)            printf 'info' ;;
     *)                   printf '' ;;
@@ -583,8 +583,8 @@ Maintenance:
 
 Configuration:
   region CODE           Change egress region (e.g., DE, US, JP)
-  httpport PORT         Change HTTP proxy port (default: 8080)
-  socksport PORT        Change SOCKS proxy port (default: 1080)
+  httpport PORT         Change HTTP proxy port (default: 40005)
+  socksport PORT        Change SOCKS proxy port (default: 40004)
   loglevel LEVEL        Change log level: debug, info, warn, error
   config                Display current configuration (JSON)
 

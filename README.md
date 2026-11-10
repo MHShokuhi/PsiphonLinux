@@ -30,6 +30,9 @@ Installer and management CLI for Psiphon on Linux (AMD64/x86_64).
 - **AMD64 (x86_64)** architecture only
 - Root/sudo access
 - `curl`, `jq`, `readelf` (binutils), `useradd`, `flock`, `setpriv` or `runuser` (util-linux), `systemd`
+```bash
+apt install curl jq binutils util-linux
+```
 
 ## Features
 
@@ -93,15 +96,15 @@ psiphon [command] [argument]
 | Command | Description | Example |
 |---------|-------------|---------|
 | `region CODE` | Change egress region | `sudo psiphon region DE` |
-| `httpport PORT` | Change HTTP proxy port (default 8080) | `sudo psiphon httpport 8081` |
-| `socksport PORT` | Change SOCKS proxy port (default 1080) | `sudo psiphon socksport 1081` |
+| `httpport PORT` | Change HTTP proxy port (default 40005) | `sudo psiphon httpport 40005` |
+| `socksport PORT` | Change SOCKS proxy port (default 40004) | `sudo psiphon socksport 40004` |
 | `loglevel LEVEL` | Change log level: debug/info/warn/error | `sudo psiphon loglevel debug` |
 | `config` | Display current configuration (JSON) | `psiphon config` |
 
 Valid regions: `AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US`
 
 Notes:
-- Ports must be between 1024 and 65535 and the HTTP and SOCKS ports must differ. They are stored as JSON numbers (Psiphon refuses to start if they are strings).
+- Ports must be between 1 and 65535 and the HTTP and SOCKS ports must differ. They are stored as JSON numbers (Psiphon refuses to start if they are strings).
 - Psiphon has no `LogLevel` option of its own. `loglevel debug` therefore also turns on `EmitDiagnosticNotices` (verbose output); any other level turns it off. View output with `sudo psiphon logs`.
 
 ### Maintenance
