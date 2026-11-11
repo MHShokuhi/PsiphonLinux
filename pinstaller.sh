@@ -11,7 +11,7 @@ umask 022
 # Constants
 # ──────────────────────────────────────────────────────────────────────
 
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.0.3"
 readonly REPO="MHShokuhi/PsiphonLinux"
 readonly BRANCH="main"
 readonly BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"

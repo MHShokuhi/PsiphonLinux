@@ -101,7 +101,7 @@ psiphon [command] [argument]
 | `loglevel LEVEL` | Change log level: debug/info/warn/error | `sudo psiphon loglevel debug` |
 | `config` | Display current configuration (JSON) | `psiphon config` |
 
-Valid regions: `AT AU BE BR CA CH CZ DE DK ES FI FR GB ID IE IN IT JP NL NO PL PT RO RS SE SG US`
+Valid regions: `AT AU BE BR CA CH CZ DE DK ES FI FR GB ID IE IN IT JP NL NO PL RO RS SE SG US`
 
 Notes:
 - Ports must be between 1 and 65535 and the HTTP and SOCKS ports must differ. They are stored as JSON numbers (Psiphon refuses to start if they are strings).
@@ -200,8 +200,8 @@ Trust model: the checksum lives in the same repository as the binary, so it prot
 
 ## GitHub Actions (for maintainers)
 
-- **`.github/workflows/tests.yml`** — Runs on every push/PR: syntax, ShellCheck, then `tests/test.sh`
-- **`.github/workflows/update-psiphon-binary.yml`** — Runs every 2 days in a single job: fetches the official binary from Psiphon-Labs [binaries repo](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/), validates it (size, ELF, runs `-v`), runs the full test suite against it, and only then commits to `binary/` if it changed. If `main` is branch-protected, allow `github-actions[bot]` to push or switch the workflow to open a pull request.
+- **`.github/workflows/tests.yml`** - Runs on every push/PR: syntax, ShellCheck, then `tests/test.sh`
+- **`.github/workflows/update-psiphon-binary.yml`** - Runs every 2 days in a single job: fetches the official binary from Psiphon-Labs [binaries repo](https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries/), validates it (size, ELF, runs `-v`), runs the full test suite against it, and only then commits to `binary/` if it changed. If `main` is branch-protected, allow `github-actions[bot]` to push or switch the workflow to open a pull request.
 
 ### Running the tests
 
@@ -228,4 +228,4 @@ git update-index --chmod=+x pinstaller.sh psiphon tests/test.sh
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
